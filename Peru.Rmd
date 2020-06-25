@@ -1,0 +1,755 @@
+---
+title: "Peru_COVID19"
+author: "Cecilia"
+date: "4/27/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(xml2)
+library(rvest)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(tidyverse)
+library(deSolve)
+library(incidence)
+library(distcrete)
+library(epitrix)
+library(EpiEstim)
+library(projections)
+library(haven)
+
+```
+
+## Data processing
+
+This part processed the data, it includes several steps. First, selecting the useful column, here we keep departamento and date for the further analysis. Then we correct the data type of date. Next, we need to change the layout of the data,and add the important value, "Cases" and we use it to count the confrimed cases for each departamento on each day. For the further analysis, we also add the column "national", by adding up all the cases on each day, and "other_departamento", which is the number of total cases minus the cases in Lima. From the data set we can see that Lima is the departamento with the most confirmed cases, so we are paying extra attention to Lima in this report. 
+```{r get_Peru Infected_data, message=FALSE, warning=FALSE, tidy=TRUE, echo=TRUE}
+## Clean the data, only keep the Departamento names and the dates, and correct the datatype 
+Peru_Infected_raw <- read_csv(file = "https://github.com/Cecilia0401/Peru_COVID19/raw/master/Peru_Infected.csv")
+rm_dots <- function(x) gsub(".", "", x)
+
+
+Peru_Infected <- Peru_Infected_raw %>% 
+    select(DEPARTAMENTO, fecha) %>% 
+    rename( Departamento = DEPARTAMENTO,Date = fecha ) 
+
+Peru_Infected$Date <- as.Date((Peru_Infected$Date), "%m/%d/%Y")
+Peru_Infected
+Peru_Infected_departamento <- Peru_Infected %>% group_by(Date) %>% count(Departamento, name = "Cases") 
+Peru_Infected_national <- Peru_Infected %>% group_by(Date) %>% count(Date, name = "Cases") %>% mutate(Departamento = "NATIONAL")
+
+Peru_Infected <- rbind(Peru_Infected_departamento, Peru_Infected_national)
+
+Peru_Infected$Cases <- as.numeric(Peru_Infected$Cases) 
+typeof(Peru_Infected$Cases)
+Peru_Infected <- Peru_Infected %>%                 
+     pivot_wider(Date,
+        names_from = Departamento,
+         values_from=Cases, 
+        values_fill = list(Cases = 0)) %>% 
+    mutate("Other_Departamento" = NATIONAL - LIMA)
+
+
+```
+
+Here is process of cleaning the death data set, and it is similar with the infected data set. 
+
+```{r get_Peru Death_data, message=FALSE, warning=FALSE, tidy=TRUE, echo=TRUE}
+Peru_Death_raw <- read_csv(file = "https://github.com/Cecilia0401/Peru_COVID19/raw/master/Peru_Death.csv")
+Peru_Death <- Peru_Death_raw %>% 
+    select(DEPARTAMENTO, 'Death Date') %>% 
+    rename( Departamento = DEPARTAMENTO,Date = 'Death Date') 
+Peru_Death$Date <- as.Date((Peru_Death$Date), "%m/%d/%y")
+Peru_Death_departamento <- Peru_Death%>% group_by(Date) %>% count(Departamento, name = "Cases") 
+Peru_Death_national <- Peru_Death %>% group_by(Date) %>% count(Date, name = "Cases") %>% mutate(Departamento = "NATIONAL")
+
+Peru_Death<- rbind(Peru_Death_departamento, Peru_Death_national)
+
+Peru_Death$Cases <- as.numeric(Peru_Death$Cases) 
+
+Peru_Death <- Peru_Death %>%                 
+     pivot_wider(Date,
+        names_from = Departamento,
+         values_from=Cases, 
+        values_fill = list(Cases = 0)) %>% 
+    mutate("Other_Departamento" = NATIONAL - LIMA)
+```
+
+
+## Daily cumulative incidence
+
+With the prepared data set, we can conduct the analysis. First is data visulization, daily cumulative incidence means the aggregate confirmed cases on each day. In the following chart, we divided the total cases into 3 groups, which are national(total), Lima, and other departamentos.
+
+
+```{r cumulative_incidence, message=FALSE, warning=FALSE, tidy=TRUE, fig.width=10, fig.height=10}
+Peru_Infected %>%
+    pivot_longer(-Date, names_to="Departamento",
+                 values_to="incident_cases") %>%
+  filter(Departamento %in% c("LIMA", "Other_Departamento", "NATIONAL")) %>%
+  mutate(Departamento =ordered(Departamento, levels=c("LIMA", "Other_Departamento", "NATIONAL"),
+                          labels=c("LIMA", "Other Departamento", "NATIONAL"))) -> daily_incidence_peru
+
+cumulative_incidence_peru <- daily_incidence_peru %>%
+  group_by(Departamento) %>%
+  arrange(Date) %>%
+  mutate(cumulative_incident_cases=cumsum(incident_cases)) 
+
+cumulative_incidence_peru %>%
+  ggplot(aes(x=Date, y=cumulative_incident_cases)) + geom_point() + geom_line() +
+    scale_x_date(date_breaks="7 days", date_labels = "%d %b") +
+    facet_grid(Departamento ~ ., scales="free_y") + labs(y="Daily cumulative incidence",
+                                   title="Lab-confirmed cases of COVID-19 in Peru, 2020",
+                                   caption="Note: varying y-axis scales") +
+  theme(legend.position = "none", 
+          strip.text.y = element_text(size=11))
+ 
+```
+
+From the above charts, it is noticeable that the increasing rates are similar, the continuous increase of confirmed cases happens around Mar 5th, after April 2th, the increasing rate became bigger and bigger, yet around April 20th, the curves go flat again. [Since 15 March, President Martín Vizcarra began to made a series national announcements, to implement social distancing to slow down the infection speed.](https://en.wikipedia.org/wiki/COVID-19_pandemic_in_Peru) 
+
+
+
+Then plot the same dataset on a logarithmic _y_ axis. A linear increase on a log scale is expected if the epidemic curve is indeed exponential.
+
+```{r log_cumulative_incidence, message=FALSE, warning=FALSE, tidy=TRUE, fig.width=10, fig.height=10}
+cumulative_incidence_peru %>%
+  ggplot(aes(x=Date, y=cumulative_incident_cases)) + geom_point() + geom_line() +
+    scale_y_log10() +
+    scale_x_date(date_breaks="7 days", date_labels = "%d %b") +
+    facet_grid(Departamento ~., scales="free_y") + labs(y="Daily cumulative incidence (log scale)",
+                                   title="Lab-confirmed cases of COVID-19 in Peru, 2020",
+                                   caption="Note: varying y-axis scales") +
+    theme(legend.position = "none", 
+          strip.text.y = element_text(size=9))
+```
+
+
+## Daily incremental incidence 
+
+Then we should also look into daily incremental incidence. 
+
+```{r daily_incidence, message=FALSE, warning=FALSE, tidy=TRUE, fig.width=10, fig.height=10}
+daily_incidence_peru %>%
+  ggplot(aes(x=Date, y=incident_cases))  + # geom_point() + geom_line() +
+    geom_bar(stat="identity") + 
+    scale_x_date(date_breaks="7 days", date_labels = "%d %b") +
+    facet_grid(Departamento ~., scales="free_y") + labs(y="Daily incremental incidence",
+                                   title="Lab-confirmed cases of COVID-19 in Peru",
+                                   caption="Note: varying y-axis scales")  +
+    theme(legend.position = "none", 
+          strip.text.y = element_text(size=11))
+
+```
+
+
+## Epidemic curves for all departamento
+
+```{r all_departamento_incidence, message=FALSE, warning=FALSE, tidy=TRUE, fig.height=16, fig.width=10}
+p <- Peru_Infected %>%
+    pivot_longer(-Date, names_to="Departamento",
+                 values_to="incident_cases") %>%
+  filter(!Departamento %in% c("National","NA")) %>%
+  ggplot(aes(x=Date, y=incident_cases)) + # geom_point() + geom_line() +
+    geom_bar(stat="identity") + 
+    facet_wrap(Departamento ~., scales = "free_y", ncol=3) + labs(y="Daily incremental incidence",
+                                   title="Lab-confirmed cases of COVID-19 in Peru, 2020",
+                                   subtitle="Note: differing y-axis scales") +
+    theme(legend.position = "none", 
+          strip.text.y = element_text(size=7))
+print(p)
+```
+
+
+## Daily cumulative deaths
+
+```{r cumulative_deaths, message=FALSE, warning=FALSE, tidy=TRUE, fig.width=10, fig.height=10}
+Peru_Death %>%
+    pivot_longer(-Date, names_to="Departamento",
+                 values_to="deaths_in_confirmed_cases") %>%
+  filter(Departamento %in% c("LIMA", "NATIONAL", "Other_Departamento")) %>%
+  mutate(Departamento=ordered(Departamento, levels=c("LIMA", "NATIONAL", "Other_Departamento"),
+                          labels=c("LIMA", "NATIONAL", "Other Departamentos"))) -> daily_deaths_peru
+
+cumulative_deaths_peru <- daily_deaths_peru %>%
+  group_by(Departamento) %>%
+  drop_na("Date") %>% 
+  arrange(Date) %>%
+  tidyr::replace_na(list(deaths_in_confirmed_cases = 0)) %>%
+  mutate(cumulative_deaths_in_confirmed_cases=cumsum(deaths_in_confirmed_cases))# %>% 
+  
+cumulative_deaths_peru %>%
+  ggplot(aes(x=Date, y=cumulative_deaths_in_confirmed_cases)) + # geom_point() + geom_line() +
+    geom_bar(stat="identity") + 
+    facet_grid(Departamento ~., scales="free_y") + labs(y="Daily cumulative deaths",
+                                   title="Cumulative deaths in lab-confirmed cases of COVID-19 in Peru",
+                                   caption="Note: varying y-axis scales") +
+  theme(legend.position = "none", 
+          strip.text.y = element_text(size=11))
+```
+
+
+## The daily incremental deaths in lab-confirmed cases.
+
+```{r daily_deaths_plot, message=FALSE, warning=FALSE, tidy=TRUE, fig.width=10, fig.height=10}
+daily_deaths_peru %>%
+  ggplot(aes(x=Date, y=deaths_in_confirmed_cases)) + # geom_point() + geom_line() +
+    geom_bar(stat="identity") + 
+    facet_grid(Departamento ~., scales="free_y") + labs(y="Daily incremental deaths",
+                                   title="Daily deaths in lab-confirmed cases of COVID-19 in Peru",
+                                   caption="Note: varying y-axis scales")  +
+    theme(legend.position = "none", 
+          strip.text.y = element_text(size=11))
+```
+
+
+## Incidence and deaths
+
+```{r daily_case_deaths_plot, message=FALSE, warning=FALSE, tidy=TRUE,fig.width=10, fig.height=8}
+daily_incidence_peru %>%
+  filter(Departamento %in% c("LIMA", "NATIONAL")) %>%
+  mutate(series="Lab-confirmed cases",
+         count=incident_cases) %>%
+  select(Date, Departamento, series, count) -> a
+
+daily_deaths_peru %>%
+  filter(Departamento %in% c("LIMA", "NATIONAL")) %>%
+  mutate(series="Deaths in lab-confirmed cases",
+         count=deaths_in_confirmed_cases) %>%
+  select(Date, Departamento, series, count) -> b
+
+a %>%
+  bind_rows(b) %>%
+  ggplot(aes(x=Date, y=count)) + # geom_point() + geom_line() +
+    geom_bar(stat="identity") + 
+    facet_grid(series~Departamento, scales="free_y") + labs(y="Daily incremental count",
+                                   title="Daily cases and deaths in Lima and all of Peru",
+                                   caption="Note: varying y-axis scales")  +
+    theme(legend.position = "none", 
+          strip.text = element_text(size=11))
+```
+
+
+
+
+# Fitting an SIR model to the Peru's data
+
+Here we are going to build up statistic modeling to furter illustrate the data. 
+ S stands for Susceptible, I stands for Infected and symptomatic, and R stands for Recovered. 
+```{r SIR_function, echo=TRUE}
+SIR <- function(time, state, parameters) {
+  par <- as.list(c(state, parameters))
+  with(par, {
+    dS <- -beta * I * S / N
+    dI <- beta * I * S / N - gamma * I
+    dR <- gamma * I
+    list(c(dS, dI, dR))
+    })
+}
+```
+
+(According to the (https://en.wikipedia.org/wiki/Lima_District) Lima's population is 8,445,211.
+
+```{r incidence_vector, tidy=TRUE, echo=TRUE}
+# put the daily cumulative incidence numbers for Lima from 
+# 15th Jan to 30th Jan into a vector called Infected
+sir_start_date <- "2020-03-04"
+
+Infected <- cumulative_incidence_peru %>%
+              filter(Departamento == "LIMA",
+                     Date >= ymd("2020-02-07"),
+                     Date <= ymd("2020-04-23")) %>%
+              pull(cumulative_incident_cases)
+
+# Create an incrementing Day vector the same length as our cases vector
+Day <- 1:(length(Infected))
+N = 8445211
+
+# now specify initial values for S, I and R
+init <- c(S = N-Infected[1], I = Infected[1], R = 0)
+
+```
+
+```{r define_RSS_function, tidy=TRUE, echo=TRUE}
+# define a function to calculate the residual sum of squares (RSS),
+# passing in parameters beta and gamma that are to be optimised for the
+# best fit to the incidence data
+RSS <- function(parameters) {
+  names(parameters) <- c("beta", "gamma")
+  out <- ode(y = init, times = Day, func = SIR, parms = parameters)
+  fit <- out[ , 3]
+  sum((Infected - fit)^2)
+}
+```
+
+```{r fit_SIR_model, tidy=TRUE, echo=TRUE}
+# now find the values of beta and gamma that give the smallest RSS,
+# which represents the best fit to the data. Start with values of 0.5 for each,
+# and constrain them to the interval 0 to 1.0
+Opt <- optim(c(0.5, 0.5), RSS, 
+             method = "L-BFGS-B", 
+             lower = c(0, 0), upper = c(1, 1)) 
+
+# check for convergence
+Opt$message
+```
+
+
+Now we can examine the fitted values for $\beta$ and $\gamma$.
+```{r SIR_model_fit_examine, echo=TRUE}
+Opt_par <- setNames(Opt$par, c("beta", "gamma"))
+Opt_par
+```
+
+
+```{r SIR_model_plot_fitted_data, echo=TRUE, tidy=TRUE, message=FALSE}
+# time in days for predictions
+t <- 1:as.integer(today() - ymd(sir_start_date)) 
+
+# get the fitted values from our SIR model
+fitted_cumulative_incidence <- data.frame(ode(y = init, times = t, 
+                                              func = SIR, parms = Opt_par))
+# add a Date column and join the observed incidence data
+fitted_cumulative_incidence <- fitted_cumulative_incidence %>%
+    mutate(Date=ymd(sir_start_date) + days(t-1),
+           Departamento="LIMA") %>%
+    left_join(cumulative_incidence_peru %>% 
+                ungroup() %>%
+                filter(Departamento =="LIMA") %>%
+                select(Date, cumulative_incident_cases))
+
+# plot the data
+options(scipen=3) 
+fitted_cumulative_incidence %>%
+    filter(Date <= ymd("2020-04-23"), Date >= ymd("2020-03-04"),) %>%
+    ggplot(aes(x= Date)) + geom_line(aes(y=I), colour="red") +
+              geom_point(aes(y=cumulative_incident_cases), colour="orange") +
+              labs(y="Cumulative incidence", 
+                   title="COVID-19 fitted vs observed cumulative incidence, Lima",
+                   subtitle="(red=fitted incidence from SIR model, orange=observed incidence)")
+```
+
+
+I found that the start date is a key point. The first case confirmed in Lima is on Feburary 7th, but if we set this date as the start date, the prediction curve goes up much faster than the confirmed cases curve. However, if I set the start date on march 4th, which I got from the analysis of Part 2, the confirmed cases curve rises up faster than the prediction curve. If we want to make a precise chart, we need to determine the right start date. However, if we use March 4th as the start date, the $R_{e}$  will be 1.2. I don't think this is a right number in this case. 
+
+Let's calculate $R_{e}$  first:
+```{r SIR_model_R0, echo=FALSE, tidy=TRUE}
+R0 <- setNames(Opt_par["beta"] / Opt_par["gamma"], "R0")
+R0
+```
+
+(1.4-3.9)
+
+
+## Using the SIR model for Lima to make predictions
+
+If there is no intervention, we can see the predicted case number is very high.
+
+```{r SIR_model_plot_extrapolated, echo=FALSE, tidy=TRUE, message=FALSE, warning=FALSE}
+fitted_cumulative_incidence %>%
+    ggplot(aes(x=Date)) + geom_line(aes(y=I), colour="red") +
+              geom_point(aes(y=cumulative_incident_cases), colour="orange") +
+              scale_y_continuous(labels = scales::comma) +
+              labs(y="Cumulative incidence", 
+                   title="COVID-19 fitted vs observed cumulative incidence, Lima Departamento",
+                   subtitle="(red=fitted incidence from SIR model, orange=observed incidence)")
+```
+
+## Using our model to let the outbreak “run its course” without intervention
+
+I think there is something wrong for this part because the curves are too flat. I tried to figured it out, but I couldn't. Same thing happened to the next chart.
+```{r SIR_model_plot_no_intervention, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+# time in days for predictions
+t <- 1:70
+sir_start_date = "2020-03-04"
+# get the fitted values from our SIR model
+fitted_cumulative_incidence <- data.frame(ode(y = init, times = t, 
+                                              func = SIR, parms = Opt_par))
+# add a Date column and join the observed incidence data
+fitted_cumulative_incidence <- fitted_cumulative_incidence %>%
+    mutate(Date=ymd(sir_start_date) + days(t-1),
+           Departamento ="LIMA") %>%
+    left_join(cumulative_incidence_peru %>% 
+                ungroup() %>%
+                filter(Departamento =="LIMA") %>%
+                select(Date, cumulative_incident_cases))
+
+# plot the data
+fitted_cumulative_incidence %>%
+    ggplot(aes(x=Date)) + geom_line(aes(y=I), colour="red") +
+              geom_line(aes(y=S), colour="black") +
+              geom_line(aes(y=R), colour="green") +
+              geom_point(aes(y=cumulative_incident_cases), colour="orange") +
+              scale_y_continuous(labels = scales::comma) +
+              labs(y="Persons", 
+                   title="COVID-19 fitted vs observed cumulative incidence, Lima Departamento") +
+              scale_colour_manual(name = '', 
+         values =c('red'='red', 'black'='black', 'green'='green', 'orange'='orange'), 
+         labels = c('Susceptible', 'Recovered', 'Observed incidence', 'Infectious'))
+```
+
+t is easier to see what is going on if we use a log scale:
+
+```{r SIR_model_plot_no_intervention_log, echo=FALSE, tidy=TRUE, message=FALSE, warning=FALSE}
+# plot the data
+fitted_cumulative_incidence %>%
+    ggplot(aes(x=Date)) + geom_line(aes(y=I, colour="red")) +
+              geom_line(aes(y=S, colour="black")) +
+              geom_line(aes(y=R, colour="green")) +
+              geom_point(aes(y=cumulative_incident_cases, colour="orange")) +
+              scale_y_log10(labels = scales::comma) +
+              labs(y="Persons", 
+                   title="COVID-19 fitted vs observed cumulative incidence, Lima") + 
+              scale_colour_manual(name = '', 
+         values =c('red'='red', 'black'='black', 'green'='green', 'orange'='orange'), 
+         labels = c('Susceptible', 'Recovered', 'Observed incidence', 'Infectious'))
+```
+
+
+
+## Ascertainment rates
+
+It is possible that only a proportion of actual cases are detected or found or sent for testing. This proportion is been called the ascertainment rate. Here for the simplicity, we can assume a fixed ascertainment rate of 20%。 If we apply that, the inflatiing number of incident caes will be multiplied by a factor of 5, and refit the model, here are the results. 
+
+```{r SIR_with_ascertianment_rate, tidy=TRUE}
+
+sir_start_date <- "2020-03-04"
+Infected <- cumulative_incidence_peru %>%
+              filter(Departamento == "LIMA",
+                     Date >= ymd("2020-03-04"),
+                     Date <= ymd("2020-04-23")) %>%
+              pull(cumulative_incident_cases)
+# Apply a fixed 20% ascertainment rate
+Infected <- Infected * 5
+# Create an incrementing Day vector the same length as our cases vector
+Day <- 1:(length(Infected))
+# now specify initial values for S, I and R
+init <- c(S = N-Infected[1], I = Infected[1], R = 0)
+RSS <- function(parameters) {
+  names(parameters) <- c("beta", "gamma")
+  out <- ode(y = init, times = Day, func = SIR, parms = parameters)
+  fit <- out[ , 3]
+  sum((Infected - fit)^2)
+}
+Opt <- optim(c(0.5, 0.5), RSS, 
+             method = "L-BFGS-B", 
+             lower = c(0, 0), upper = c(1, 1)) 
+# check for convergence
+Opt$message
+Opt_par <- setNames(Opt$par, c("beta", "gamma"))
+Opt_par
+R0 <- setNames(Opt_par["beta"] / Opt_par["gamma"], "R0")
+R0
+```
+
+It is actually lower than the earlier $R_{e}$ . Here we need deeper and further consideration. In the original report, the author's result remains the same with the number without the ascertainment rates. According to the author "Note that that is for a fixed ascertainment rate. If the ascertainment rate varies significantly over time, then the parameter estimates will necessarily be biased – but in the early days of an outbreak, it may be reasonable to assume that ascertainment rates don’t change too much."
+
+```{r SIR_model_plot_no_intervention_ascertainment_adjustment, tidy=TRUE, message=FALSE, warning=FALSE}
+# time in days for predictions
+t <- 1:70
+# get the fitted values from our SIR model
+fitted_cumulative_incidence <- data.frame(ode(y = init, times = t, 
+                                              func = SIR, parms = Opt_par))
+# add a Date column and join the observed incidence data
+fitted_cumulative_incidence <- fitted_cumulative_incidence %>%
+    mutate(Date=ymd(sir_start_date) + days(t-1),
+           Departamento ="LIMA") %>%
+    left_join(cumulative_incidence_peru %>% 
+                ungroup() %>%
+                filter(Departamento =="LIMA") %>%
+                select(Date, cumulative_incident_cases))
+# plot the data
+fitted_cumulative_incidence %>%
+    ggplot(aes(x=Date)) + geom_line(aes(y=I), colour="red") +
+              geom_line(aes(y=S), colour="black") +
+              geom_line(aes(y=R), colour="green") +
+              geom_point(aes(y=cumulative_incident_cases*5), colour="orange") +
+              scale_y_log10(labels = scales::comma) +
+              labs(y="Persons", 
+                   title="COVID-19 fitted vs observed cumulative incidence adjusted for 20% ascertainment, LIMA") +
+              scale_colour_manual(name = '', 
+         values =c('red'='red', 'black'='black', 'green'='green', 'orange'='orange'), 
+         labels = c('Susceptible', 'Recovered', 'Observed incidence', 'Infectious'))
+```
+
+
+## SEIR
+SEIR model is a more complicated model, becuase it takes "E", the phase of "Exposed/infected but asymptomatic" into consideration. 
+```{r incidence_object, echo=TRUE, tidy=TRUE, message=FALSE}
+# create a vector of dates, in character form, one for each case in Lima on each date
+# using the uncount() function.
+lima_incidence_function_data <- Peru_Infected %>%
+                          filter(Date >= ymd("2020-02-07")) %>%
+                          mutate(incident_cases_lima= LIMA) %>%
+                          select(Date, incident_cases_lima) %>%
+                          uncount(incident_cases_lima)
+
+lima_incidence_object <- incidence(lima_incidence_function_data$Date)
+```
+
+
+
+```{r plot_incidence_object, echo=TRUE, tidy=TRUE, message=FALSE}
+lima_incidence_peak <- find_peak(lima_incidence_object)
+
+plot(lima_incidence_object) + 
+  geom_vline(xintercept = lima_incidence_peak, col = "red", lty = 2) +
+  labs(title="Daily incidence of lab-confirmed cases, lima",
+       subtitle = "(red line indicates date of peak incidence)")
+```
+
+
+From this chart, we can see the date of peak incidence and it is the last third day before the end day of the data set. Given this situation, it is possible that the real pick hasn't come yet. 
+
+
+
+```{r fit_incidence_object_lima, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE, preview=TRUE}
+lima_incidence_fit <- incidence::fit(lima_incidence_object,
+                                     split=lima_incidence_peak)
+ #plot the incidence data and the model fit
+#plot(lima_incidence_object) %>% 
+ # add_incidence_fit(lima_incidence_fit) +
+  #labs(title="Observed and modelled incidence of COVID-19 cases",
+      # subtitle="Lima, 2020")
+```
+The above code is not working well. I'm not sure it's the codes' problem or the data's prblem.
+
+
+
+## Estimating the reproduction number from log-linear models
+
+By using log-linear modles of the epidemic trajectroy, we can estimate the reproduction number in the groth and decay phases of the epidemic. Here we need the serial interval time, which is the time period between the onset of a primary case and the time of onset in its secondary cases. To parameterise a discrete gamma distribution for the serial interval, here we'll adopt 7.5 days as the mean and 3.4 days as the distribution's standard deviation. 
+
+```{r est_R0_growth, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+mu <- 7.5 # days
+sigma <- 3.4 # days
+param <- gamma_mucv2shapescale(mu, sigma / mu)
+w <- distcrete("gamma", interval = 1,
+                 shape = param$shape,
+                 scale = param$scale, w = 0)
+growth_R0 <- lm2R0_sample(lima_incidence_fit$before$model, w)
+hist(growth_R0, col = "grey", border = "white", main = "Distribution of R0")
+summary(growth_R0)
+```
+
+It's noticeable that the central estimates for $R_{e}$  are higher than those we calculated with a SIR model fitted to the same data. 
+
+
+## Estimating changes in the effective reproduction number
+
+Given the above, it would be useful to estimate the current effective reproduction number $R_{e}$ on a day-by-day basis so as to track the effectiveness of public health interventions, and possibly predict at the earliest opportunity when an outbreak will turn the corner. Is that possible?
+
+We'll start with the counts of lab-confirmed cases from the first case comfirmed in Feb 7th. We'll treat the initial cases before March 4th as "imported", possibly from other countries.
+
+```{r Cori_model_get_data_lima, echo=FALSE, tidy=TRUE, message=FALSE}
+lima_confirmed_cases <- Peru_Infected %>%
+                          filter(Date >= ymd("2020-02-07")) %>%
+                          mutate(imported=ifelse(Date <= ymd("2020-03-04"), LIMA, 0),
+                                 local=ifelse(Date <= ymd("2020-03-04"), 0, LIMA)) %>%
+                          select(Date, local, imported) %>%
+                          rename(dates=Date)
+lima_confirmed_cases <- read_csv(file = "https://github.com/Cecilia0401/Peru_COVID19/raw/master/lima_confrimed_cases.csv")
+lima_confirmed_cases$dates <- as.Date((lima_confirmed_cases$dates), "%m/%d/%Y")
+
+#Reimported the data here.Because the following function requires that the date should be in sequal, so I downloaded the data into excel and added the missing dates with 0 confirmed cases and reuploaded it. 
+```
+
+
+ _Serial interval_ (SI). The SI is the time between onset of symptoms of each case of the disease in question, and the onset of symptoms in any secondary cases that result from transmission from the primary cases. In other words, it is the time between cases in the (branching) chain of transmission of the disease. I used the serial interval distribution to have a mean of 7.5 days with a standard deviation of 3.4 days, and this is derived from 5 primary cases amongst the first 450 cases in Wuhan, according to the original author Tim Churches.
+
+```{r Cori_parametric_si_model_fit_lima, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+# custom results plotting function to avoid the ugly
+# TableGrob messages returned by the plotting function
+# in the EpiEstim package
+plot_Ri <- function(estimate_R_obj) {
+  p_I <- plot(estimate_R_obj, "incid", add_imported_cases=TRUE) # plots the incidence
+  p_SI <- plot(estimate_R_obj, "SI") # plots the serial interval distribution
+  p_Ri <- plot(estimate_R_obj, "R")
+  return(gridExtra::grid.arrange(p_I, p_SI, p_Ri, ncol = 1))
+}
+lima_res_parametric_si <- estimate_R(lima_confirmed_cases,
+                                      method="parametric_si",
+                                      config = make_config(list(
+                                                           mean_si = 7.5, 
+                                                           std_si = 3.4)))
+plot_Ri(lima_res_parametric_si)
+```
+ 
+It's noticeable that the  the slope of the effective reproduction number curve is decidedly downwards and it is a good sign. Also, the Estimated $R_{e}$ experienced a small peak during early March, then it goes down too. Same situation happened in Churches' research too. He explained it as following:"One possible explanation is that COVID-19 is transmissible before the onset of symptoms, resulting in much shorter serial intervals than expected, possibly shorter than the incubation period. Alternatively, and very likely, there may be non-symptomatic, sub-clinical spreaders of the disease, who are undetected. Again, the effect is as if the serial interval is very short, although it would be desirable to explicitly model that scenario, but current methods don’t permit that."
+ 
+
+ If we re-calculate, but using a mean of just 2.3 days for the SI distribution, and an SD of 1.4, we get these estimates:
+ 
+
+```{r Cori_parametric_si_model_fit2_lima, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+lima_res_parametric_si <- estimate_R(lima_confirmed_cases,
+                                      method="parametric_si",
+                                      config = make_config(list(
+                                                           mean_si = 2.3, 
+                                                           std_si = 1.4)))
+plot_Ri(lima_res_parametric_si)
+
+```
+ 
+ 
+In this case, $R_{e}$ makes more sense than before. 
+
+"Let’s retain the mean SI estimated by Li et al. of 7.5 days, with an SD of 3.4, but let’s also allow that mean SI to vary between 2.3 and 8.4 using a truncated normal distribution with an SD of 2.0. We’ll also allow the SD or the SD to vary between 0.5 and 4.0."
+
+
+```{r Cori_uncertain_si_model_fit_lima, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+lima_res_uncertain_si <- estimate_R(lima_confirmed_cases,
+                                method="uncertain_si",
+                                config = make_config(list(
+                                  mean_si = 7.5, std_mean_si = 2.0,
+                                  min_mean_si = 1, max_mean_si = 8.4,
+                                  std_si = 3.4, std_std_si = 1.0,
+                                  min_std_si = 0.5, max_std_si = 4.0,
+                                  n1 = 1000, n2 = 1000)))
+plot_Ri(lima_res_uncertain_si)
+```
+
+
+
+
+Let’s use those serial interval data to re-estimate $R_{e}$. Bayesian methods are used, and the trace output below is from the MCMC (Markov-chain Monte Carlo) resampling methods used.
+
+
+```{r Cori_empirical_si_model_fit_lima_daily, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+SL=c(5,9,7,3,7,8,1,3,7,9,12)
+si_data_lima_Li <- data.frame(EL=as.integer(rep(0,11)),
+                               ER=as.integer(rep(1,11)),
+                               SL=as.integer(SL),
+                               SR=as.integer(SL+1))
+## fixing the random seeds
+MCMC_seed <- 1
+overall_seed <- 2
+mcmc_control <- make_mcmc_control(seed = MCMC_seed, 
+                                  burnin = 1000)
+dist <- "G" # fitting a Gamma distribution for the SI
+empirical_si_config <- make_config(list(si_parametric_distr = dist,
+                           mcmc_control = mcmc_control,
+                           seed = overall_seed, 
+                           n1 = 50, 
+                           n2 = 50))
+lima_res_empirical_si <- estimate_R(lima_confirmed_cases,
+                               method = "si_from_data",
+                               si_data = si_data_lima_Li,
+                               config = empirical_si_config)
+plot_Ri(lima_res_empirical_si)
+```
+
+
+```{r Cori_uncertain_si_model_fit_lima_daily, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+t_start <- seq(5, length(lima_confirmed_cases$local)-1)   
+t_end <- t_start + 1                 
+empirical_si_config_daily <- make_config(list(si_parametric_distr = dist,
+                           mcmc_control = mcmc_control,
+                           seed = overall_seed, 
+                           n1 = 50, 
+                           n2 = 50,
+                           t_start = t_start, 
+                           t_end = t_end))
+lima_res_uncertain_si_daily <- estimate_R(lima_confirmed_cases,
+                               method = "si_from_data",
+                               si_data = si_data_lima_Li,
+                               config = empirical_si_config_daily)
+#I got exactly same numbers with the original work for the above code, but I'm using the Peru data?
+# plot_Ri(lima_res_uncertain_si_daily)
+plot(lima_res_uncertain_si_daily, "R") +
+  scale_y_continuous(trans='log2') +
+  geom_hline(yintercept=1.0, linetype="solid", colour='red', size=0.5)
+```
+
+ The daily incremental incidence numbers for Lima:
+```{r lima_daily_incidence_adj, echo=FALSE, tidy=TRUE, message=FALSE, warning=FALSE}
+
+Peru_Infected %>%
+              ggplot(aes(x=Date, y=LIMA)) +
+    geom_point() +
+    geom_line() +
+    labs(y="Daily incremental incidence",
+         title="Lima lab-confirmed cases")
+```
+ 
+More data is needed to verify that the outbreak has been brought under control in Lima. But we can see the situation in the end of April is getting better.
+
+
+## Estimating changes in the _effective reproduction number_ for other departamentos
+
+```{r Cori_model_get_data_not_lima, echo=FALSE, tidy=TRUE, message=FALSE, eval=TRUE, warning=FALSE}
+od_confirmed_cases <- Peru_Infected %>%
+                          filter(Date >= ymd("2020-02-07")) %>%
+                          mutate(imported=ifelse(Date <= ymd("2020-03-04"), Other_Departamento, 0),
+                                 local=ifelse(Date <= ymd("2020-03-04"), 0, Other_Departamento)) %>%
+                          select(Date, local, imported) %>%
+                          rename(dates=Date) %>%
+                          filter(dates <= ymd("2020-04-23"))
+od_confirmed_cases <- read_csv(file = "https://github.com/Cecilia0401/Peru_COVID19/raw/master/od.csv")
+od_confirmed_cases$dates <- as.Date((od_confirmed_cases$dates), "%m/%d/%Y")
+t_start <- seq(2, length(od_confirmed_cases$local)-1)   
+t_end <- t_start + 1                 
+empirical_si_config_daily <- make_config(list(si_parametric_distr = dist,
+                           mcmc_control = mcmc_control,
+                           seed = overall_seed, 
+                           n1 = 50, 
+                           n2 = 50,
+                           t_start = t_start, 
+                           t_end = t_end))
+od_res_uncertain_si <- estimate_R(od_confirmed_cases,
+                               method = "si_from_data",
+                               si_data = si_data_lima_Li,
+                               config = empirical_si_config_daily)
+# It is also same with the original research, why?
+plot(od_res_uncertain_si, "R") +
+  scale_y_continuous(trans='log2') +
+  geom_hline(yintercept=1.0, linetype="solid", colour='red', size=0.5) +
+  labs(title="Instantaneous effective reproduction numbers, all departamentos except Lima")
+```
+
+We can tell that the $R_{e}$ is lower than Lima in general, and it is also going down after Apr 7th. More observation is needed to determine that the outbreak is undercontrol. 
+
+
+## Projections
+
+```{r test_projection_lima_growth, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+set.seed(1)
+pred_fwd_days <- 20
+date_range <- 1:(which(get_dates(lima_incidence_object) == lima_incidence_peak) - pred_fwd_days)
+test_pred_growth <- project(lima_incidence_object[date_range],
+                            R = median(growth_R0),
+                            si = w,
+                            n_days = pred_fwd_days, n_sim = 1000)
+# convert the test_pred_growth matrix to a data frame and get the median 
+# incidence for all the simulations for each date
+test_pred_growth_median_counts <- test_pred_growth %>% 
+  as.data.frame() %>%
+  pivot_longer(-dates, 
+               names_to="simulation", 
+               values_to="incidence") %>%
+  group_by(dates) %>%
+  summarise(incident_cases=as.integer(median(incidence))) %>%
+  mutate(data_type = "projection")
+test_pred_growth_median_counts %>%
+  bind_rows(tibble(dates=get_dates(lima_incidence_object),
+                   incident_cases=get_counts(lima_incidence_object),
+                   data_type="observed")) %>%
+  ggplot(aes(x=dates, y=incident_cases, colour=data_type)) +
+    geom_point() +
+    geom_line() +
+    labs(x="", y="Daily incident confirmed cases",
+         title="Observed versus growth-phase projection of incident cases\nin Lima province",
+         subtitle=paste("(projection based on observed case counts up to", 
+                        format(lima_incidence_peak - days(pred_fwd_days), "%d %B %Y"),
+                        ")")) +
+         theme(legend.position="top", legend.title = element_blank())
+```
+
+
+
+```{r}
+warnings()
+```
+

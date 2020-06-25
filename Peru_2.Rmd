@@ -1,0 +1,307 @@
+---
+title: "peru_part2"
+author: "Cecilia"
+date: "5/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(magrittr)
+library(lubridate)
+library(stringr)
+library(tibble)
+library(broom)
+library(ggplot2)
+library(ggthemes)
+library(hrbrthemes)
+library(rvest)
+library(gt)
+library(deSolve)
+library(EpiEstim)
+library(incidence)
+library(distcrete)
+library(epitrix)
+library(projections)
+library(earlyR)
+library(readr)
+library(formatR)
+```
+
+```{r get_peru infected_data, message=FALSE, warning=FALSE, tidy=TRUE, echo=TRUE}
+last_date_p <- ymd("2020-04-23") ## The data on 4.24 could be incomplete,so I'm using 4.23 as the last date of this analysis.
+## Clean the data, only keep the Departamento names and the dates, and correct the datatype 
+Peru_Infected_raw <- read_csv(file = "https://github.com/Cecilia0401/Peru_COVID19/raw/master/Peru_Infected.csv")
+
+## Clean the data.
+peru_infected <- Peru_Infected_raw %>% 
+    select(DEPARTAMENTO, fecha) %>% 
+    rename( Departamento = DEPARTAMENTO,Date = fecha )  ## Select the two key variables
+peru_infected$Date <- as.Date((peru_infected$Date), "%m/%d/%Y") ## Correct the data type of "Date" 
+
+peru_infected <- peru_infected %>% group_by(Date) %>% count(Departamento, name = "Incident_cases") 
+## Get the total infected number group by datapartamento
+peru_infected$Incident_cases <- as.numeric(peru_infected$Incident_cases) 
+## Correct the data type
+```
+
+# A further exploration of incidence numbers in Peru
+
+Let's see the total cases to date by departamento first. 
+
+```{r}
+peru_infected %>%
+  filter(Date <= last_date_p) %>%
+  ggplot(aes(x=Date, y=Incident_cases)) +
+  geom_bar(stat="identity") +
+  labs(y="Incident_cases", 
+       title="COVID-19 incident cases in Peru") +
+  theme(legend.position="top")
+```
+
+
+Here are the epidemic curves (daily incident case counts) for the top 6 departamentos.
+
+```{r,fig.height=8, fig.width=10, message=FALSE, warning=FALSE}
+peru_infected %>% 
+    group_by(Departamento) %>%
+    summarise(total=sum(Incident_cases, na.rm=TRUE)) %>%
+    arrange(desc(total)) %>%
+    pull(Departamento) -> peru_departamentos_order
+p <- peru_infected %>%
+  filter(Date <= last_date_p,
+         Departamento %in% peru_departamentos_order[1:6]) %>%
+  mutate(Departamento = ordered(Departamento, levels=peru_departamentos_order[1:6])) %>%
+  ggplot(aes(x=Date, y=Incident_cases)) + 
+  geom_bar(stat="identity", fill="dark blue") + 
+  facet_wrap(Departamento ~., scales = "free_y", ncol=3) + labs(y="Daily incremental incidence",
+                                   title="Confirmed Cases of COVID-19 in Top Six Peru Departamentos",
+                                   subtitle="Note: differing y-axis scales") +
+  theme(legend.position = "none", 
+          strip.text.y = element_text(size=15))
+print(p)
+```
+
+
+## By Departamento
+
+Then we can examine the epidemic curves by prefecture, as well as 7-day sliding window effective reproduction number plots, and force-of-infection $\lambda$ plots. Using these we should be able to make an assessment of how well containment efforts are succeeding (assuming that case detection and reporting doesn't change).
+
+Force-of-infection: the rate at which susceptible individuals acquire an infectious disease. 
+$\lambda$ = 1/A, A = the average time spent in the susceptible group before becoming infected. So the rate of becoming infected ($\lambda$) is 1/A. It means that the bigger the $\lambda$ is, the stronger the force of infection will be.
+
+Effective reproductive number: the average number of secondary cases per infectious case in a population made up of both susceptible and non-susceptible hosts. If R>1, the number of cases will increase, such as at the start of an epidemic. Where R=1, the disease is endemic, and where R<1 there will be a decline in the number of cases.
+
+```{r Cori_model_get_data_k, echo=FALSE, tidy=TRUE, message=FALSE, eval=TRUE}
+plot_R_p <- function(departamento, departamento_start_date) {
+  
+  confirmed_cases_p <- peru_infected %>%
+                          filter(Date <= last_date_p) %>% 
+                          filter(Date >= departamento_start_date) %>% 
+                          filter(Departamento == departamento) %>%
+                          filter(!is.na(Incident_cases)) %>%
+                          select(Date, Incident_cases) %>%
+                          rename(dates=Date,
+                                 I=Incident_cases)
+  estimate_R_obj_p <- estimate_R(confirmed_cases_p,
+                               method="uncertain_si",
+                                config = make_config(list(
+                                  mean_si = 7.5, std_mean_si = 2.0,
+                                  min_mean_si = 1, max_mean_si = 8.4,
+                                  std_si = 3.4, std_std_si = 1.0,
+                                  min_std_si = 0.5, max_std_si = 4.0,
+                                  n1 = 1000, n2 = 1000)))
+  ## In this post, we will incorporate this uncertainty around the serial interval distribution by specifying a distribution of SI distributions for the estimation of the instantaneous effective reproduction number Re. We’ll retain the mean SI estimated by Li et al. of 7.5 days, with an SD of 3.4, but let’s also allow that mean SI to vary between 2.3 and 8.4 using a truncated normal distribution with an SD of 2.0. We’ll also allow the SD of the SD to vary between 0.5 and 4.0.  https://timchurches.github.io/blog/posts/2020-03-01-analysing-covid-19-2019-ncov-outbreak-data-with-r-part-2/
+                               
+  plot(estimate_R_obj_p, "R") + labs(title=paste("Instantaneous effective R - ", departamento))
+}
+epicurve_p <- function(departamento) {
+  peru_infected %>%
+    filter(Departamento == departamento) %>%
+    group_by(Date) %>%
+    summarise(Incident_cases=sum(Incident_cases, na.rm=TRUE)) %>%
+    filter(Date <= last_date_p) %>%
+    ggplot(aes(x=Date, y=Incident_cases)) +
+    geom_bar(stat="identity") +
+    labs(y="Incident_cases", 
+         title=paste("COVID-19 incident cases in", departamento)) +
+    theme(legend.position="top")
+}
+departamento_earlyR <- function(df, departamento, last_date, si_mean, si_sd) {
+  df %>%
+  filter(Date <= last_date,
+         !is.na(Incident_cases),
+         Departamento == departamento) %>%
+  select(Date, Incident_cases) %>%
+  uncount(Incident_cases) %>%
+  pull(Date) -> local_case_dates
+  
+  local_case_dates %>%
+  incidence(., last_date=last_date_p) -> local_cases
+  
+  res <- get_R(local_cases, si_mean =si_mean, si_sd = si_sd)
+  res$local_case_dates <- local_case_dates
+  res$departamento<- departamento
+  res$last_date <- last_date
+  res$si_mean <- si_mean
+  res$si_sd <- si_sd
+  return(res)
+}
+departamento_plot_R <- function(res) {
+  plot(res, "R", main=paste("COVID-19 estimated R for", 
+                            res$departamento,
+                            "using data to",
+                            format(res$last_date, "%d %b %Y")),
+                 sub=paste("(assuming serial interval mean =",
+                            res$si_mean, 
+                            ", sd =", 
+                            res$si_sd,")"),
+       bty="n")
+}
+departamento_plot_lambda <- function(res) {
+  plot(res, "lambdas", scale = length(res$local_case_dates) + 1,
+       bty="n")
+  title(sub=paste("\nEstimated", expression(lambda), "for", 
+                            res$departamento, 
+                            "(assuming serial interval mean =",
+                            res$si_mean, 
+                            ", sd =", 
+                            res$si_sd, ")"))
+  abline(v = res$local_case_dates, lwd = 3, col = "grey")
+  abline(v = res$last_date_p, col = "blue", lty = 2, lwd = 2)
+  points(res$local_case_dates, seq_along(res$local_case_dates), pch = 20, cex = 3)
+}
+lambda_plot_p <- function(departamento) {
+  res_obj <- departamento_earlyR(peru_infected, 
+                              departamento, 
+                              last_date_p,
+                              si_mean,
+                              si_sd)
+  departamento_plot_lambda(res_obj)
+}
+```
+
+```{r}
+si_mean <- 5.0
+si_sd <- 3.4
+alt_si_mean <- 7.5
+alt_si_sd <- 3.4
+```
+
+## Lima
+
+```{r}
+departamento <- "LIMA"
+departamento_start_date <- ymd("2020-03-04")
+epicurve_p(departamento)
+```
+
+```{r}
+lambda_plot_p(departamento)
+```
+
+```{r}
+plot_R_p(departamento, departamento_start_date)
+```
+
+**Assessment**: The outbreak appears to be controlled with rises and falls , but the battle is not done.
+
+
+## Callao
+
+
+```{r}
+departamento <- "CALLAO"
+departamento_start_date <- ymd("2020-03-14")
+epicurve_p(departamento)
+```
+
+
+```{r}
+lambda_plot_p(departamento)
+```
+
+
+
+```{r}
+plot_R_p(departamento, departamento_start_date)
+```
+
+**Assessment**: The ups and dones are very obvious, the R curve is going down sharply after a peak, but continuous observation is needed.
+
+
+### Lambayeque
+
+```{r}
+departamento <- "LAMBAYEQUE"
+departamento_start_date <- ymd("2020-03-19")
+epicurve_p(departamento)
+```
+
+```{r}
+lambda_plot_p(departamento)
+```
+
+
+```{r}
+plot_R_p(departamento, departamento_start_date)
+```
+
+
+**Assessment**: After April 20, the $R_{e}$ goes under the R0, it seems the outbreak is under control.
+
+
+### Loreto
+
+```{r}
+departamento <- "LORETO"
+departamento_start_date <- ymd("2020-03-16")
+epicurve_p(departamento)
+```
+
+```{r}
+lambda_plot_p(departamento)
+```
+
+```{r}
+plot_R_p(departamento, departamento_start_date)
+```
+
+
+**Assessment**:  the $R_{e}$ goes under the $R_{0}$, then it goes up slightly again, but it is still under control, so stronger measurements are required to prevent the second wave.
+
+### Piura
+
+```{r}
+departamento <- "PIURA"
+departamento_start_date <- ymd("2020-03-15")
+epicurve_p(departamento)
+```
+
+```{r}
+lambda_plot_p(departamento)
+```
+
+```{r}
+plot_R_p(departamento, departamento_start_date)
+```
+
+**Assessment**: the $R_{e}$ goes down first for a few days, then the real outbreak came after April 9th, but the $R_{e}$ is going down again now, but more oberservation is needed.
+
+### Ancash
+```{r}
+departamento <- "ANCASH"
+departamento_start_date <- ymd("2020-03-27")
+epicurve_p(departamento)
+```
+
+```{r}
+lambda_plot_p(departamento)
+```
+
+```{r}
+plot_R_p(departamento, departamento_start_date)
+```
+
+
+**Assessment**: the $R_{e}$ goes down first for a few days, then the real outbreak came after April 9th, but the $R_{e}$ is going down again now, but more oberservation is needed.
